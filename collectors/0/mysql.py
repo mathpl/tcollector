@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 # This file is part of tcollector.
 # Copyright (C) 2011  The tcollector Authors.
 #
@@ -214,7 +214,7 @@ def collectInnodbStatus(db):
   """Collects and prints InnoDB stats about the given DB instance."""
   ts = now()
   def printmetric(metric, value, tags=""):
-    print "mysql.%s %d %s schema=%s%s" % (metric, ts, value, db.dbname, tags)
+    print "mysql.innodb.%s %d %s schema=%s%s" % (metric, ts, value, db.dbname, tags)
 
   innodb_status = db.query("SHOW ENGINE INNODB STATUS")[0][2]
   m = re.search("^(\d{6}\s+\d{1,2}:\d\d:\d\d) INNODB MONITOR OUTPUT$",
@@ -226,58 +226,238 @@ def collectInnodbStatus(db):
   def match(regexp):
     return re.match(regexp, line)
 
+  counters_metrics = ["tables_in_use",
+                      "tables_locked",
+                      "sem_waits",
+                      "sem_wait_time_ms",
+                      "current_transactions",
+                      "active_transactions",
+                      "lock_wait_secs",
+                      "lock_structs",
+                      "locked_transactions"]
+
+  counters= {}
+  for key in counters_metrics:
+    counters[key] = 0
+
   for line in innodb_status.split("\n"):
-    # SEMAPHORES
-    m = match("OS WAIT ARRAY INFO: reservation count (\d+), signal count (\d+)")
-    if m:
-      printmetric("innodb.oswait_array.reservation_count", m.group(1))
-      printmetric("innodb.oswait_array.signal_count", m.group(2))
-      continue
-    m = match("Mutex spin waits (\d+), rounds (\d+), OS waits (\d+)")
-    if m:
-      printmetric("innodb.locks.spin_waits", m.group(1), " type=mutex")
-      printmetric("innodb.locks.rounds", m.group(2), " type=mutex")
-      printmetric("innodb.locks.os_waits", m.group(3), " type=mutex")
-      continue
-    m = match("RW-shared spins (\d+), OS waits (\d+);"
-              " RW-excl spins (\d+), OS waits (\d+)")
-    if m:
-      printmetric("innodb.locks.spin_waits", m.group(1), " type=rw-shared")
-      printmetric("innodb.locks.os_waits", m.group(2), " type=rw-shared")
-      printmetric("innodb.locks.spin_waits", m.group(3), " type=rw-exclusive")
-      printmetric("innodb.locks.os_waits", m.group(4), " type=rw-exclusive")
-      continue
-    # INSERT BUFFER AND ADAPTIVE HASH INDEX
-    # TODO(tsuna): According to the code in ibuf0ibuf.c, this line and
-    # the following one can appear multiple times.  I've never seen this.
-    # If that happens, we need to aggregate the values here instead of
-    # printing them directly.
-    m = match("Ibuf: size (\d+), free list len (\d+), seg size (\d+),")
-    if m:
-      printmetric("innodb.ibuf.size", m.group(1))
-      printmetric("innodb.ibuf.free_list_len", m.group(2))
-      printmetric("innodb.ibuf.seg_size", m.group(3))
-      continue
-    m = match("(\d+) inserts, (\d+) merged recs, (\d+) merges")
-    if m:
-      printmetric("innodb.ibuf.inserts", m.group(1))
-      printmetric("innodb.ibuf.merged_recs", m.group(2))
-      printmetric("innodb.ibuf.merges", m.group(3))
-      continue
-    # ROW OPERATIONS
-    m = match("\d+ queries inside InnoDB, (\d+) queries in queue")
-    if m:
-      printmetric("innodb.queries_queued", m.group(1))
-      continue
-    m = match("(\d+) read views open inside InnoDB")
-    if m:
-      printmetric("innodb.opened_read_views", m.group(1))
-      continue
-    # TRANSACTION
-    m = match("History list length (\d+)")
-    if m:
-      printmetric("innodb.history_list_length", m.group(1))
-      continue
+    try:
+      # SEMAPHORES
+      m = match("OS WAIT ARRAY INFO: reservation count (\d+), signal count (\d+)")
+      if m:
+        printmetric("oswait_array.reservation_count", m.group(1))
+        printmetric("oswait_array.signal_count", m.group(2))
+        continue
+      m = match("Mutex spin waits (\d+), rounds (\d+), OS waits (\d+)")
+      if m:
+        printmetric("locks.spin_waits", m.group(1), " type=mutex")
+        printmetric("locks.rounds", m.group(2), " type=mutex")
+        printmetric("locks.os_waits", m.group(3), " type=mutex")
+        continue
+      m = match("RW-shared spins (\d+), OS waits (\d+);"
+                " RW-excl spins (\d+), OS waits (\d+)")
+      if m:
+        printmetric("locks.spin_waits", m.group(1), " type=rw-shared")
+        printmetric("locks.os_waits", m.group(2), " type=rw-shared")
+        printmetric("locks.spin_waits", m.group(3), " type=rw-exclusive")
+        printmetric("locks.os_waits", m.group(4), " type=rw-exclusive")
+        continue
+
+      # INSERT BUFFER AND ADAPTIVE HASH INDEX
+      # TODO(tsuna): According to the code in ibuf0ibuf.c, this line and
+      # the following one can appear multiple times.  I've never seen this.
+      # If that happens, we need to aggregate the values here instead of
+      # printing them directly.
+      #m = match("Ibuf: size (\d+), free list len (\d+), seg size (\d+),")
+      m = match("Ibuf: size (\d+), free list len (\d+), seg size (\d+)")
+      if m:
+        printmetric("ibuf.size", m.group(1))
+        printmetric("ibuf.free_list_len", m.group(2))
+        printmetric("ibuf.seg_size", m.group(3))
+        m = match(".* (\d+) merges")
+        if m:
+          printmetric("ibuf.merges", m.group(1))
+
+        continue
+      m = match(" insert (\d+), delete mark (\d+), delete (\d+)")
+      if m:
+        printmetric("ibuf.inserts", m.group(1))
+        printmetric("ibuf.merged", long(m.group(2)) + long(m.group(3)))
+        continue
+      # ROW OPERATIONS
+      m = match("(\d+) queries inside InnoDB, (\d+) queries in queue")
+      if m:
+        printmetric("queries_inside", m.group(1))
+        printmetric("queries_queued", m.group(2))
+        continue
+      m = match("(\d+) read views open inside InnoDB")
+      if m:
+        printmetric("opened_read_views", m.group(1))
+        continue
+      # Transaction history list
+      m = match("History list length (\d+)")
+      if m:
+        printmetric("history_list_length", m.group(1))
+        continue
+
+      # FILE I/O
+      m = match(" ibuf aio reads: (\d+), log i/o's: (\d+), sync i/o's: (\d+)")
+      if m:
+        printmetric("pending_ibuf_aio_reads", m.group(1))
+        printmetric("pending_aio_log_ios", m.group(2))
+        printmetric("pending_aio_sync_ios", m.group(3))
+        continue
+      m = match("Pending flushes \(fsync\) log: (\d+); buffer pool: (\d+)")
+      if m:
+        # pending_log_flushes == Innodb_os_log_pending_fsyncs from show status
+        #printmetric("pending_log_flushes", m.group(1))
+        printmetric("pending_buffer_pool_flushes", m.group(2))
+        continue
+
+
+      # Log
+      m = match("Log sequence number\s+(\d+)")
+      if m:
+        #Deal with bigint
+        n = match("Log sequence number\s+(\d+)\s+(\d+)")
+        if n:
+          log_seq = long(n.group(1) + n.group(2))
+        else:
+          log_seq = long(m.group(1))
+        printmetric("log_bytes_written", log_seq)
+        continue
+      m = match("Log flushed up to\s+(\d+)")
+      if m:
+        #Deal with bigint
+        n = match("Log flushed up to\s+(\d+)\s+(\d+)")
+        if n:
+          log_flush_up_to = long(n.group(1) + n.group(2))
+        else:
+          log_flush_up_to = long(m.group(1))
+        printmetric("log_bytes_flushed", log_flush_up_to)
+        printmetric("unflushed_log", log_seq - log_flush_up_to)
+        continue
+      m = match("Last checkpoint at\s+(\d+)")
+      if m:
+        #Deal with bigint
+        n = match("Last checkpoint at\s+(\d+)\s+(\d+)")
+        if n:
+          last_checkpoint = long(n.group(1) + n.group(2))
+        else:
+          last_checkpoint = long(m.group(1))
+        printmetric("last_checkpoint", log_flush_up_to)
+        printmetric("uncheckpointed_bytes", log_seq - last_checkpoint)
+        continue
+      m = match("(\d+) pending log writes, (\d+) pending chkp writes")
+      if m:
+        printmetric("pending_log_writes", m.group(1))
+        printmetric("pending_checkpoint_writes", m.group(2))
+        continue
+      m = match("(\d+) log i/o's done, ")
+      if m:
+        printmetric("log_writes", m.group(1))
+        continue
+
+      # Buffer pool and memory
+      m = match("Dictionary memory allocated\s+(\d+)")
+      if m:
+        printmetric("dictionary_memory", m.group(1))
+      m = match("Free buffers\s+(\d+)")
+      if m:
+        printmetric("buffer_pool.free_buffers", m.group(1))
+        continue
+      m = match("Database pages\s+(\d+)")
+      if m:
+        printmetric("buffer_pool.db_pages", m.group(1))
+        continue
+      m = match("Old database pages\s+(\d+)")
+      if m:
+        printmetric("buffer_pool.old_db_pages", m.group(1))
+        continue
+      m = match("Modified db pages\s+(\d+)")
+      if m:
+        printmetric("buffer_pool.modified_db_pages", m.group(1))
+        continue
+      m = match("Total memory allocated (\d+); in additional pool allocated (\d+)")
+      if m:
+        printmetric("total_mem_alloc", m.group(1))
+        printmetric("additional_pool_alloc", m.group(2))
+        continue
+      m = match("Buffer pool hit rate (\d+) / 1000, young-making rate (\d+) / 1000 not (\d+) / 1000")
+      if m:
+        printmetric("buffer_pool.hit_rate", m.group(1))
+        printmetric("buffer_pool.young_making_rate", m.group(2))
+        printmetric("buffer_pool.not_rate", m.group(3))
+        continue
+
+      #Tables in use/locked
+      m = match("mysql tables in use (\d+), locked (\d+)")
+      if m:
+        counters["tables_in_use"] = int(m.group(1)) + counters["tables_in_use"]
+        counters["tables_locked"] = int(m.group(2)) + counters["tables_locked"]
+        continue
+
+      #Semaphore wait count and total
+      m = match(".*for (\d+\.\d+) seconds the semaphore:")
+      if m:
+        counters["sem_waits"] = counters["sem_waits"] + 1
+        counters["sem_wait_time_ms"] = int(float(m.group(1))*1000) + counters["sem_wait_time_ms"]
+        continue
+
+      #Transactions
+      m = match("Trx id counter (\S+)")
+      if m:
+        #Deal with bigint
+        n = match("Trx id counter (\S+) (\S+)")
+        if n:
+          trx_count = long(n.group(1) + n.group(2), 16)
+        else:
+          trx_count = long(m.group(1), 16)
+        printmetric("transactions", trx_count)
+        continue
+      m = match("Purge done for trx's n:o < (\S+)")
+      if m:
+        #Deal with bigint
+        n = match("Purge done for trx's n:o < (\S+) (\S+) undo")
+        if n:
+          unpurged_trx_count = long(n.group(1) + n.group(2), 16)
+        else:
+          unpurged_trx_count = long(m.group(1), 16)
+        unpurged_trx_diff = trx_count - unpurged_trx_count
+        printmetric("unpurged_transactions", unpurged_trx_diff)
+        continue
+      m = match("---TRANSACTION")
+      if m:
+        counters["current_transactions"] = counters["current_transactions"] + 1
+        m = match(".*ACTIVE")
+        if m:
+          counters["active_transactions"] = counters["active_transactions"] + 1
+        continue
+      m = match("------- TRX HAS BEEN WAITING (\d+) SEC")
+      if m:
+        counters["lock_wait_secs"] = int(m.group(1)) + counters["lock_wait_secs"]
+        continue
+      m = match("(\d+) read views open inside InnoDB")
+      if m:
+        printmetric("read_views", m.group(1))
+        continue
+      m = match("(LOCK WAIT |)(\d+) lock struct")
+      if m:
+        counters["lock_structs"] = int(m.group(2)) + counters["lock_structs"]
+        if m.group(1):
+          counters["locked_transactions"] = counters["locked_transactions"] + 1
+        continue
+      m = match("(\d+) queries inside InnoDB, (\d+) queries in queue")
+      if m:
+        printmetric("queries_inside", m.group(1))
+        printmetric("queries_queued", m.group(2))
+        continue
+    except Exception, e:
+      err("Error processiong innodb data: %s" % e)
+  
+  # Aggregated metrics
+  for key, value in counters.iteritems():
+    printmetric(key, value)
 
 
 def collect(db):
@@ -289,7 +469,8 @@ def collect(db):
 
   has_innodb = False
   if db.isShowGlobalStatusSafe():
-    for metric, value in db.query("SHOW GLOBAL STATUS"):
+    global_status = db.query("SHOW GLOBAL STATUS")
+    for metric, value in global_status:
       try:
         if "." in value:
           value = float(value)
@@ -330,6 +511,10 @@ def collect(db):
   else:
     master_host = None
 
+  mysql_master_logs = db.query("SHOW MASTER LOGS")
+  if mysql_master_logs:
+     master_logs = todict(db, mysql_master_logs[0])
+
   if master_host and master_host != "None":
     sbm = slave_status.get("seconds_behind_master")
     if isinstance(sbm, (int, long)):
@@ -340,10 +525,29 @@ def collect(db):
                 isyes(slave_status["slave_io_running"]))
     printmetric("slave.thread_sql_running",
                 isyes(slave_status["slave_sql_running"]))
+    printmetric("slave.relay_log_space", slave_status["relay_log_space"])
+
+  if master_logs:
+    # Total binlog space usage
+    if "file_size" in master_logs:
+      total_size=0
+      for row in mysql_master_logs:
+        row = todict(db, row)
+        total_size += row["file_size"]
+      printmetric("binary_log_space", total_size)
 
   states = {}  # maps a connection state to number of connections in that state
   for row in db.query("SHOW PROCESSLIST"):
     id, user, host, db_, cmd, time, state = row[:7]
+
+    # MySQL 5.5 replaces the 'Locked' state with a variety of "Waiting for
+    # X lock" types of statuses.  Wrap these all back into "Locked" because
+    # we don't really care about the type of locking it is.
+    if state and re.match('^(Locked|Table lock|Waiting for .*lock)$',state):
+      cmd = "locked"
+    elif state and re.match('^User lock$',state):
+      cmd = "user_locked"
+
     states[cmd] = states.get(cmd, 0) + 1
   for state, count in states.iteritems():
     state = state.lower().replace(" ", "_")
@@ -352,12 +556,20 @@ def collect(db):
 
 def main(args):
   """Collects and dumps stats from a MySQL server."""
-  if not find_sockfiles():  # Nothing to monitor.
-    return 13               # Ask tcollector to not respawn us.
+  while True:
+    if find_sockfiles():
+      break
+    else:
+      time.sleep(COLLECTION_INTERVAL)
+      continue
+
+# if not find_sockfiles():  # Nothing to monitor.
+#   return 13               # Ask tcollector to not respawn us.
   if MySQLdb is None:
     err("error: Python module `MySQLdb' is missing")
     return 1
 
+  utils.drop_privileges()
   last_db_refresh = now()
   dbs = find_databases()
   while True:

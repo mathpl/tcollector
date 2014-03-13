@@ -152,7 +152,6 @@ class Collector(object):
         # chunk.  This read call is non-blocking.
         try:
             self.buffer += self.proc.stdout.read()
-            LOG.error(self.buffer)
             if len(self.buffer):
                 LOG.debug('reading %s, buffer now %d bytes',
                           self.name, len(self.buffer))

@@ -39,7 +39,6 @@ from Queue import Empty
 from Queue import Full
 from optparse import OptionParser
 
-
 # global variables.
 COLLECTORS = {}
 GENERATION = 0
@@ -153,6 +152,7 @@ class Collector(object):
         # chunk.  This read call is non-blocking.
         try:
             self.buffer += self.proc.stdout.read()
+            LOG.error(self.buffer)
             if len(self.buffer):
                 LOG.debug('reading %s, buffer now %d bytes',
                           self.name, len(self.buffer))
@@ -261,7 +261,7 @@ class ReaderThread(threading.Thread):
        All data read is put into the self.readerq Queue, which is
        consumed by the SenderThread."""
 
-    def __init__(self, dedupinterval, evictinterval, default_host_tag):
+    def __init__(self, dedupinterval, evictinterval):
         """Constructor.
             Args:
               dedupinterval: If a metric sends the same value over successive
@@ -273,8 +273,8 @@ class ReaderThread(threading.Thread):
                 combination of (metric, tags).  Values older than
                 evictinterval will be removed from the cache to save RAM.
                 Invariant: evictinterval > dedupinterval
-              default_host_tag: The default host tag to be added if the host tag
-                is not present.
+              default_tags: The default tags to be added if they are not
+                present. Includes the default host tag.
         """
         assert evictinterval > dedupinterval, "%r <= %r" % (evictinterval,
                                                             dedupinterval)
@@ -285,7 +285,6 @@ class ReaderThread(threading.Thread):
         self.lines_dropped = 0
         self.dedupinterval = dedupinterval
         self.evictinterval = evictinterval
-        self.default_host_tag = default_host_tag
 
     def run(self):
         """Main loop for this thread.  Just reads from collectors,
@@ -337,9 +336,6 @@ class ReaderThread(threading.Thread):
             return
         metric, timestamp, value, tags = parsed.groups()
         timestamp = int(timestamp)
-        if " host=" not in tags:
-            tags += " host=%s" % self.default_host_tag
-            line += " host=%s" % self.default_host_tag
 
         # De-dupe detection...  To reduce the number of points we send to the
         # TSD, we suppress sending values of metrics that don't change to
@@ -410,7 +406,7 @@ class SenderThread(threading.Thread):
        buffering we might need to do if we can't establish a connection
        and we need to spool to disk.  That isn't implemented yet."""
 
-    def __init__(self, reader, dryrun, hosts, self_report_stats, tags, default_host_tag):
+    def __init__(self, reader, dryrun, hosts, self_report_stats, default_tags):
         """Constructor.
 
         Args:
@@ -427,7 +423,7 @@ class SenderThread(threading.Thread):
 
         self.dryrun = dryrun
         self.reader = reader
-        self.tagstr = tags
+        self.default_tags = default_tags
         self.hosts = hosts  # A list of (host, port) pairs.
         # Randomize hosts to help even out the load.
         random.shuffle(self.hosts)
@@ -439,7 +435,6 @@ class SenderThread(threading.Thread):
         self.last_verify = 0
         self.sendq = []
         self.self_report_stats = self_report_stats
-        self.default_host_tag = default_host_tag
 
     def pick_connection(self):
         """Picks up a random host/port connection."""
@@ -579,7 +574,7 @@ class SenderThread(threading.Thread):
 
                 ts = int(time.time())
                 strout = ["tcollector.%s %d %d host=%s %s"
-                          % (x[0], ts, x[2], self.default_host_tag, x[1]) for x in strs]
+                          % (x[0], ts, x[2], self.default_tags["host"], x[1]) for x in strs]
                 for string in strout:
                     self.sendq.append(string)
 
@@ -643,6 +638,13 @@ class SenderThread(threading.Thread):
                 LOG.error('Failed to connect to %s:%d', self.host, self.port)
                 self.blacklist_connection()
 
+    def add_default_tags(self,line):
+      add_default_tags = ''
+      for tagname, tagval in self.default_tags.iteritems():
+        if re.search(" %s=" % tagname, line) is None:
+          add_default_tags += " %s=%s" % (tagname,tagval)
+      return line + add_default_tags
+
     def send_data(self):
         """Sends outstanding data in self.sendq to the TSD in one operation."""
 
@@ -652,11 +654,13 @@ class SenderThread(threading.Thread):
         # in case of logging we use less efficient variant
         if LOG.level == logging.DEBUG:
             for line in self.sendq:
-                line = "put %s%s" % (line, self.tagstr)
+                line = "put %s" % self.add_default_tags(line)
                 out += line + "\n"
                 LOG.debug('SENDING: %s', line)
         else:
-            out = "".join("put %s%s\n" % (line, self.tagstr) for line in self.sendq)
+            #Make a pass to add default tags if missing
+            for line in self.sendq:
+              out += "put %s\n" % self.add_default_tags(line)
 
         if not out:
             LOG.debug('send_data no data?')
@@ -842,17 +846,8 @@ def main(argv):
     modules = load_etc_dir(options, tags)
 
     if not 'host' in tags and not options.stdin:
-        default_host_tag = socket.gethostname()
-        LOG.warning('Tag "host" not specified, defaulting to %s.', default_host_tag)
-    elif 'host' in tags:
-        default_host_tag = tags['host']
-        del tags['host']
-
-    # prebuild the tag string from our tags dict
-    tagstr = ''
-    if tags:
-        tagstr = ' '.join('%s=%s' % (k, v) for k, v in tags.iteritems())
-        tagstr = ' ' + tagstr.strip()
+        tags["host"] = socket.gethostname()
+        LOG.warning('Tag "host" not specified, defaulting to %s.', tags["host"])
 
     setup_python_path(options.cdir)
 
@@ -863,7 +858,7 @@ def main(argv):
 
     # at this point we're ready to start processing, so start the ReaderThread
     # so we can have it running and pulling in data for us
-    reader = ReaderThread(options.dedupinterval, options.evictinterval, default_host_tag)
+    reader = ReaderThread(options.dedupinterval, options.evictinterval)
     reader.start()
 
     # prepare list of (host, port) of TSDs given on CLI
@@ -886,7 +881,7 @@ def main(argv):
 
     # and setup the sender to start writing out to the tsd
     sender = SenderThread(reader, options.dryrun, options.hosts,
-                          not options.no_tcollector_stats, tagstr, default_host_tag)
+                          not options.no_tcollector_stats, tags)
     sender.start()
     LOG.info('SenderThread startup complete')
 
